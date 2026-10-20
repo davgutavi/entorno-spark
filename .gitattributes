@@ -1,0 +1,3 @@
+# Finales de línea LF en todos los sistemas (Windows incluido): los lee Linux dentro de los contenedores
+* text=auto eol=lf
+*.zip binary

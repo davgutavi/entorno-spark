@@ -1,0 +1,4 @@
+# La imagen solo necesita estos ficheros: así no se envían ./datos (cientos de MB) ni los notebooks
+*
+!requirements.txt
+!conf/

@@ -1,0 +1,167 @@
+# ============================================================
+#  Entorno de prácticas del bloque de Spark (Spark 4.2, PySpark)
+#
+#    Arrancar:            docker compose up -d
+#    Con Kafka:           docker compose --profile streaming up -d
+#    Parar:               docker compose --profile streaming down
+#    Actualizar imagen:   docker compose pull
+#    Construirla en local: docker compose build
+#
+#    JupyterLab           http://localhost:8888
+#    UI del master        http://localhost:8080
+#    Spark UI             http://localhost:4040 (4041, 4042… para las siguientes)
+#
+#  ./datos se monta en /datos en todos los contenedores (driver y executors
+#  ven los ficheros en la misma ruta) y ./notebooks es la carpeta de trabajo
+#  de JupyterLab. Todos los puertos se ligan a 127.0.0.1: JupyterLab va sin token.
+# ============================================================
+
+name: spark-bd
+
+# Imagen común a los cuatro servicios de Spark, publicada en GHCR para amd64
+# y arm64 (.github/workflows/publicar-imagen.yml). Si no se puede descargar,
+# `docker compose up` la construye, una sola vez, en spark-master.
+x-spark: &spark
+  image: ghcr.io/davgutavi/spark-bd:4.2.0
+  init: true
+  volumes:
+    - ./datos:/datos
+    - ./conf:/opt/spark/conf:ro
+
+# Python en lugar de curl: la imagen no trae curl
+x-healthcheck: &healthcheck
+  interval: 5s
+  timeout: 5s
+  retries: 20
+  start_period: 10s
+
+services:
+
+  spark-master:
+    <<: *spark
+    build: .
+    hostname: spark-master
+    command: spark-class org.apache.spark.deploy.master.Master
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+      # Cada aplicación coge 2 de los 4 núcleos del clúster salvo que pida otra
+      # cantidad con --total-executor-cores: un notebook abierto no deja sin
+      # núcleos a un spark-submit
+      SPARK_MASTER_OPTS: -Dspark.deploy.defaultCores=2
+      SPARK_DAEMON_MEMORY: 512m
+      SPARK_PUBLIC_DNS: localhost
+    ports:
+      - "127.0.0.1:8080:8080"
+    mem_limit: 1g
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080', timeout=3)"]
+
+  spark-worker-1:
+    <<: *spark
+    hostname: spark-worker-1
+    command: spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment: &worker-env
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_WEBUI_PORT: "8091"
+      SPARK_WORKER_DIR: /tmp/spark-worker
+      SPARK_WORKER_OPTS: -Dspark.worker.cleanup.enabled=true
+      SPARK_DAEMON_MEMORY: 512m
+      SPARK_LOCAL_HOSTNAME: spark-worker-1
+      # Los enlaces de la UI del master a este worker apuntan a localhost:8091
+      SPARK_PUBLIC_DNS: localhost
+    ports:
+      - "127.0.0.1:8091:8091"
+    mem_limit: 3g
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091', timeout=3)"]
+
+  spark-worker-2:
+    <<: *spark
+    hostname: spark-worker-2
+    command: spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      <<: *worker-env
+      SPARK_WORKER_WEBUI_PORT: "8092"
+      SPARK_LOCAL_HOSTNAME: spark-worker-2
+    ports:
+      - "127.0.0.1:8092:8092"
+    mem_limit: 3g
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8092', timeout=3)"]
+
+  # JupyterLab hace de driver (modo client) y da un terminal para spark-submit
+  jupyter:
+    <<: *spark
+    hostname: jupyter
+    command:
+      - jupyter
+      - lab
+      - --ip=0.0.0.0
+      - --port=8888
+      - --no-browser
+      - --ServerApp.root_dir=/home/alumno/work
+      - --IdentityProvider.token=
+      - --PasswordIdentityProvider.hashed_password=
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      DATOS: /datos
+      # Los executors conectan con el driver por este nombre (spark.driver.host)
+      SPARK_LOCAL_HOSTNAME: jupyter
+      # sc.uiWebUrl y los enlaces de la UI del master apuntan a localhost:4040…
+      SPARK_PUBLIC_DNS: localhost
+    ports:
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:4040-4045:4040-4045"
+    volumes:
+      - ./datos:/datos
+      - ./conf:/opt/spark/conf:ro
+      - ./notebooks:/home/alumno/work
+    mem_limit: 3g
+    depends_on:
+      spark-worker-1:
+        condition: service_healthy
+      spark-worker-2:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8888/api', timeout=3)"]
+
+  # Solo con: docker compose --profile streaming up -d
+  kafka:
+    image: apache/kafka:4.3.1
+    profiles: [streaming]
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # INTERNA: desde los contenedores (kafka:9092) · EXTERNA: desde el host (localhost:29092)
+      KAFKA_LISTENERS: INTERNA://:9092,EXTERNA://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNA://kafka:9092,EXTERNA://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNA:PLAINTEXT,EXTERNA:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNA
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "127.0.0.1:29092:29092"
+    mem_limit: 1g
+    healthcheck:
+      <<: *healthcheck
+      start_period: 20s
+      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx64m /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]

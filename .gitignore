@@ -1,0 +1,20 @@
+# Datos del curso: se distribuyen aparte (zip en Enseñanza Virtual)
+datos/*
+!datos/.gitkeep
+
+# Trabajo de cada alumno en JupyterLab
+notebooks/*
+!notebooks/.gitkeep
+.ipynb_checkpoints/
+
+# Salidas de Spark que pudieran quedar fuera de ./datos
+spark-warehouse/
+metastore_db/
+derby.log
+checkpoint*/
+__pycache__/
+*.pyc
+
+# Sistema
+.DS_Store
+Thumbs.db
